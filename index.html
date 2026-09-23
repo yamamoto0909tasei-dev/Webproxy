@@ -1,132 +1,223 @@
+const ALLOWED_HOSTS = [
+  "example.com",
+  "www.example.com"
+];
+
+function isAllowed(url) {
+  return (
+    url.protocol === "https:" &&
+    ALLOWED_HOSTS.includes(url.hostname)
+  );
+}
+
+function createProxyUrl(origin, url) {
+  return origin + "/?url=" + encodeURIComponent(url.href);
+}
+
 export default {
   async fetch(request) {
-    const reqUrl = new URL(request.url);
+    const requestUrl = new URL(request.url);
+    const targetParam = requestUrl.searchParams.get("url");
 
-    // 1. ターゲットURLの判定（?url= パラメータまたは /https://... のパス）
-    let targetUrl = reqUrl.searchParams.get("url") || "";
+    // =========================
+    // トップページ
+    // =========================
 
-    if (!targetUrl) {
-      const path = reqUrl.pathname.slice(1);
-      if (path.startsWith("http://") || path.startsWith("https://")) {
-        targetUrl = path + reqUrl.search;
-      } else if (path.startsWith("http:/") || path.startsWith("https:/")) {
-        targetUrl = path.replace(/^(https?:\/)([^\/])/, "$1/$2") + reqUrl.search;
-      }
-    }
-
-    // 2. URLが指定されていない場合はシンプルな入力フォームを表示
-    if (!targetUrl) {
-      const formHtml = `<!DOCTYPE html>
+    if (!targetParam) {
+      const html = `<!doctype html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Web Proxy</title>
-  <style>
-    body { font-family: sans-serif; max-width: 500px; margin: 50px auto; padding: 0 20px; }
-    h2 { text-align: center; color: #333; }
-    form { display: flex; flex-direction: column; gap: 10px; }
-    input { padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }
-    button { padding: 12px; font-size: 16px; background-color: #0070f3; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Web Proxy</title>
 </head>
 <body>
-  <h2>Web Proxy</h2>
-  <form onsubmit="go(event)">
-    <input type="text" id="targetInput" placeholder="https://wikipedia.org" required>
-    <button type="submit">移動</button>
-  </form>
-  <script>
-    function go(e) {
-      e.preventDefault();
-      var input = document.getElementById('targetInput').value.trim();
-      if (!input.startsWith('http://') && !input.startsWith('https://')) {
-        input = 'https://' + input;
-      }
-      window.location.href = '/' + input;
-    }
-  </script>
+<form method="get">
+<input
+  name="url"
+  type="url"
+  placeholder="https://example.com/"
+  required
+>
+<button type="submit">開く</button>
+</form>
 </body>
 </html>`;
-      return new Response(formHtml, {
-        headers: { "Content-Type": "text/html; charset=UTF-8" }
+
+      return new Response(html, {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=UTF-8"
+        }
       });
     }
 
-    // 3. ターゲットサイトへのアクセス中継処理
+    // =========================
+    // URL解析
+    // =========================
+
+    let targetUrl;
+
+    try {
+      targetUrl = new URL(targetParam);
+    } catch {
+      return new Response("Invalid URL", {
+        status: 400,
+        headers: {
+          "content-type": "text/plain; charset=UTF-8"
+        }
+      });
+    }
+
+    // =========================
+    // 許可されたサイトか確認
+    // =========================
+
+    if (!isAllowed(targetUrl)) {
+      return new Response("Host is not allowed.", {
+        status: 403,
+        headers: {
+          "content-type": "text/plain; charset=UTF-8"
+        }
+      });
+    }
+
+    // =========================
+    // サイトへ接続
+    // =========================
+
     try {
       const headers = new Headers(request.headers);
-      headers.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
-      headers.delete("Host");
-      headers.delete("Referer");
 
-      const fetchOptions = {
+      headers.delete("host");
+
+      const options = {
         method: request.method,
         headers: headers,
         redirect: "follow"
       };
 
-      if (request.method !== "GET" && request.method !== "HEAD") {
-        fetchOptions.body = await request.clone().arrayBuffer();
+      if (
+        request.method !== "GET" &&
+        request.method !== "HEAD"
+      ) {
+        options.body = request.body;
       }
 
-      const response = await fetch(targetUrl, fetchOptions);
+      const response = await fetch(
+        targetUrl.href,
+        options
+      );
 
-      // リダイレクト後の最終URLを取得
-      const finalUrl = response.url || targetUrl;
-      const finalUrlObj = new URL(finalUrl);
-      const targetOrigin = finalUrlObj.origin;
+      const contentType =
+        response.headers.get("content-type") || "";
 
-      const contentType = response.headers.get("content-type") || "";
+      const responseHeaders =
+        new Headers(response.headers);
 
-      // 4. HTMLの場合は内部リンクをプロキシ経由に書き換え
-      if (contentType.includes("text/html")) {
-        let text = await response.text();
+      // =========================
+      // HTML以外
+      // =========================
 
-        // ページ内のルート相対パス（/wiki/... など）をプロキシURLに書き換え
-        text = text.replaceAll('href="/', `href="/${targetOrigin}/`);
-        text = text.replaceAll('src="/', `src="/${targetOrigin}/`);
-        text = text.replaceAll('action="/', `action="/${targetOrigin}/`);
-
-        // <base> タグを挿入して相対リソースを正常化
-        if (text.includes("<head>")) {
-          text = text.replace("<head>", `<head><base href="${finalUrl}">`);
-        } else if (text.includes("<HEAD>")) {
-          text = text.replace("<HEAD>", `<HEAD><base href="${finalUrl}">`);
-        }
-
-        const newHeaders = new Headers(response.headers);
-        newHeaders.set("Access-Control-Allow-Origin", "*");
-        newHeaders.delete("Content-Security-Policy");
-        newHeaders.delete("Content-Security-Policy-Report-Only");
-        newHeaders.delete("X-Frame-Options");
-        newHeaders.delete("Content-Length");
-
-        return new Response(text, {
+      if (
+        !contentType
+          .toLowerCase()
+          .includes("text/html")
+      ) {
+        return new Response(response.body, {
           status: response.status,
           statusText: response.statusText,
-          headers: newHeaders
+          headers: responseHeaders
         });
       }
 
-      // 5. 画像やCSSなどの非HTMLコンテンツの中継
-      const newHeaders = new Headers(response.headers);
-      newHeaders.set("Access-Control-Allow-Origin", "*");
-      newHeaders.delete("Content-Security-Policy");
-      newHeaders.delete("Content-Security-Policy-Report-Only");
-      newHeaders.delete("X-Frame-Options");
+      // =========================
+      // HTMLのURLを書き換える
+      // =========================
 
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: newHeaders
-      });
+      const proxyOrigin = requestUrl.origin;
+      const rewriter = new HTMLRewriter();
 
-    } catch (err) {
-      return new Response("Proxy Error: " + err.message, {
-        status: 500,
-        headers: { "Content-Type": "text/plain; charset=UTF-8" }
-      });
+      const targets = [
+        ["a", "href"],
+        ["link", "href"],
+        ["img", "src"],
+        ["script", "src"],
+        ["iframe", "src"],
+        ["video", "src"],
+        ["audio", "src"],
+        ["source", "src"],
+        ["form", "action"]
+      ];
+
+      for (const [selector, attribute] of targets) {
+        rewriter.on(selector, {
+          element(element) {
+            const value =
+              element.getAttribute(attribute);
+
+            if (!value) {
+              return;
+            }
+
+            // ページ内リンクなどは変更しない
+            if (
+              value.startsWith("#") ||
+              value.startsWith("mailto:") ||
+              value.startsWith("tel:") ||
+              value.startsWith("javascript:")
+            ) {
+              return;
+            }
+
+            try {
+              const absoluteUrl =
+                new URL(value, targetUrl.href);
+
+              if (!isAllowed(absoluteUrl)) {
+                return;
+              }
+
+              const proxyUrl =
+                createProxyUrl(
+                  proxyOrigin,
+                  absoluteUrl
+                );
+
+              element.setAttribute(
+                attribute,
+                proxyUrl
+              );
+            } catch {
+              // URLとして解釈できない場合は変更しない
+            }
+          }
+        });
+      }
+
+      // =========================
+      // HTMLを返す
+      // =========================
+
+      return rewriter.transform(
+        new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeaders
+        })
+      );
+
+    } catch (error) {
+      return new Response(
+        "Proxy Error: " + error.message,
+        {
+          status: 502,
+          headers: {
+            "content-type":
+              "text/plain; charset=UTF-8"
+          }
+        }
+      );
     }
   }
 };
