@@ -1,0 +1,22 @@
+// リクエストを受け取って指定サイトへ転送する簡易プロキシ
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    
+    // 例: https://your-worker.workers.dev/?url=https://example.com のように使う
+    const targetUrl = url.searchParams.get("url");
+
+    if (!targetUrl) {
+      return new Response("URLパラメータを指定してください (?url=https://...)", { status: 400 });
+    }
+
+    // 目的のサイトへ代わりにアクセス（プロキシ処理）
+    const response = await fetch(targetUrl, {
+      headers: request.headers,
+      method: request.method,
+      body: request.body
+    });
+
+    return response;
+  }
+};
